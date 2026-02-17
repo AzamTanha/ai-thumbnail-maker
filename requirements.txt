@@ -1,0 +1,200 @@
+app.pyimport streamlit as st
+import openai
+import requests
+from PIL import Image
+from io import BytesIO
+import re
+
+# --- Configuration ---
+st.set_page_config(layout="wide", page_title="AI Thumbnails Maker 4K")
+
+# Custom CSS for UI styling
+st.markdown("""
+<style>
+    .stButton>button {
+        width: 100%;
+        background-color: #FF0000;
+        color: white;
+        font-weight: bold;
+        border-radius: 10px;
+        height: 50px;
+    }
+    .main-title {
+        font-size: 40px;
+        font-weight: bold;
+        text-align: center;
+        background: -webkit-linear-gradient(45deg, #FF0000, #FFD700);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- Sidebar for API Key ---
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/e/ef/Youtube_logo.png", width=100)
+    st.title("Settings")
+    api_key = st.text_input("Enter OpenAI API Key", type="password")
+    if api_key:
+        openai.api_key = api_key
+    else:
+        st.warning("Please enter API Key to start.")
+
+# --- Helper Functions ---
+
+def get_video_id(url):
+    """Extracts video ID from YouTube URL"""
+    video_id = None
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def analyze_thumbnail_from_link(video_url):
+    """Gets thumbnail from YT link and generates 1-line description"""
+    vid_id = get_video_id(video_url)
+    if not vid_id:
+        return "Invalid YouTube Link"
+    
+    # Get Max Res Thumbnail
+    thumb_url = f"https://img.youtube.com/vi/{vid_id}/maxresdefault.jpg"
+    
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Analyze this YouTube thumbnail and describe exactly what is shown in just ONE concise sentence (Subject + Action + Context)."},
+                        {"type": "image_url", "image_url": {"url": thumb_url}},
+                    ],
+                }
+            ],
+            max_tokens=100,
+        )
+        return response.choices[0].message.content, thumb_url
+    except Exception as e:
+        return f"Error analyzing image: {e}", thumb_url
+
+def generate_thumbnails(prompt, user_image_desc, num_images, title_text, facial_expression):
+    """Generates thumbnails based on prompts and style"""
+    
+    generated_images = []
+    
+    # Style Injection
+    base_style = (
+        "YouTube thumbnail, 16:9 aspect ratio, 4k resolution, hyper-realistic, cinematic lighting. "
+        "Design style: High contrast, Vibrant colors, Glowing highlights, shallow depth of field (bokeh). "
+        "Composition: A YouTuber with a prominent headshot on the side performing a " 
+        f"'{facial_expression}' expression. "
+        f"Large, Bold, Modern Typography text overlay saying: '{title_text}'. "
+        "Make it look professional, scroll-stopping, and optimized for high CTR. "
+    )
+    
+    full_prompt = base_style + f"Scene details: {prompt}. "
+    if user_image_desc:
+        full_prompt += f" Incorporate style/elements from reference: {user_image_desc}."
+
+    # Loop to generate unique images (DALL-E 3 generates 1 at a time usually for high quality)
+    # Note: DALL-E 3 Standard is 1024x1024 or 1792x1024 (Wide). We use Wide for 16:9 approximation.
+    
+    progress_bar = st.progress(0)
+    
+    for i in range(num_images):
+        try:
+            # Adding slight variation to prompt to ensure uniqueness
+            variation_prompt = full_prompt + f" Variation {i+1}: Use slightly different background elements and color grading."
+            
+            response = openai.images.generate(
+                model="dall-e-3",
+                prompt=variation_prompt,
+                size="1024x1792", # Vertical is better for shorts, but for thumbnails we treat it as Wide (inverted in logic) or request Wide.
+                # OpenAI DALL-E 3 'landscape' is 1792x1024
+                quality="hd",
+                n=1,
+            )
+            image_url = response.data[0].url
+            generated_images.append(image_url)
+            progress_bar.progress((i + 1) / num_images)
+            
+        except Exception as e:
+            st.error(f"Error generating image {i+1}: {e}")
+            
+    return generated_images
+
+# --- Main App Interface ---
+
+st.markdown('<p class="main-title">AI Thumbnails Maker 🚀</p>', unsafe_allow_html=True)
+st.write("Generate Professional, High-CTR 4K Thumbnails instantly.")
+
+tab1, tab2 = st.tabs(["🔗 YouTube Link Analyzer", "🎨 Create Thumbnails"])
+
+# --- TAB 1: Link Analyzer ---
+with tab1:
+    st.header("Analyze Existing Thumbnail")
+    yt_link = st.text_input("Paste YouTube Video Link here:")
+    
+    if st.button("Analyze & Generate Description") and api_key:
+        with st.spinner("Analyzing thumbnail via AI Vision..."):
+            description, thumb_url = analyze_thumbnail_from_link(yt_link)
+            
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.image(thumb_url, caption="Original Thumbnail", use_container_width=True)
+            with col2:
+                st.subheader("What's shown in one line:")
+                st.success(description)
+                st.code(description, language=None)
+                st.info("Copy this description to use in the Generator tab!")
+
+# --- TAB 2: Thumbnail Generator ---
+with tab2:
+    st.header("Generate Unique Thumbnails")
+    
+    col_input1, col_input2 = st.columns(2)
+    
+    with col_input1:
+        video_title = st.text_input("Video Title (Text on Image)", "MYTHS BUSTED!")
+        facial_expression = st.selectbox("YouTuber Facial Expression", 
+                                         ["Shocked/Surprised", "Happy/Excited", "Angry/Furious", "Serious/Intense", "Confused/Thinking"])
+        
+    with col_input2:
+        num_variants = st.selectbox("Number of Thumbnails", [4, 6, 8])
+        reference_desc = st.text_input("Reference Image Description (Optional - from Tab 1)", placeholder="Paste analyzed text here...")
+
+    custom_prompt = st.text_area("Describe your Thumbnail Idea (Prompt)", 
+                                 "A person holding a burning smartphone in a tech lab, sparks flying, blue and orange lighting.")
+
+    if st.button("🚀 Generate Thumbnails Now") and api_key:
+        with st.spinner(f"Generating {num_variants} 4K Thumbnails... This may take a moment."):
+            
+            # Since DALL-E 3 is expensive and slow, we loop.
+            # Warning: Generating 8 images costs money on OpenAI API.
+            results = generate_thumbnails(custom_prompt, reference_desc, num_variants, video_title, facial_expression)
+            
+            st.markdown("### ✨ Your 4K Results")
+            
+            # Display in Grid
+            cols = st.columns(2)
+            for idx, img_url in enumerate(results):
+                with cols[idx % 2]:
+                    st.image(img_url, use_container_width=True)
+                    
+                    # Download Button Logic
+                    # We need to fetch the bytes to allow download
+                    img_data = requests.get(img_url).content
+                    st.download_button(
+                        label=f"⬇️ Download Thumbnail {idx+1} (High Res)",
+                        data=img_data,
+                        file_name=f"thumbnail_{idx+1}.png",
+                        mime="image/png"
+                    )
+
+if not api_key:
+    st.info("👈 not api_key")
